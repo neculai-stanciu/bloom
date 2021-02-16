@@ -75,6 +75,7 @@
             </template>
             <span>Done</span>
           </v-tooltip>
+
           <v-tooltip bottom v-if="isDone">
             <template v-slot:activator="{ on, attrs }">
               <v-btn icon v-bind="attrs" v-on="on"
@@ -84,6 +85,33 @@
             </template>
             <span>Move to Inbox</span>
           </v-tooltip>
+
+          <v-tooltip bottom v-if="isTrash">
+            <template v-slot:activator="{ on, attrs }">
+              <v-btn icon v-bind="attrs" v-on="on"
+                @click="moveConversationToInbox(selectedConversation.conversation)">
+                <v-icon>mdi-history</v-icon>
+              </v-btn>
+            </template>
+            <span>Restore</span>
+          </v-tooltip>
+
+          <v-menu bottom v-if="isInbox || isDone || isSpam">
+            <template v-slot:activator="{ on }">
+              <v-btn icon v-on="on">
+                <v-icon>mdi-dots-vertical</v-icon>
+              </v-btn>
+            </template>
+
+            <v-list>
+              <v-list-item @click="moveConversationToTrash(selectedConversation.conversation)">
+                <v-list-item-icon>
+                  <v-icon>mdi-delete</v-icon>
+                </v-list-item-icon>
+                <v-list-item-title>Move to trash</v-list-item-title>
+              </v-list-item>
+            </v-list>
+          </v-menu>
         </v-app-bar>
 
         <v-alert icon="mdi-alert-circle" type="error" :value="error !== ''" v-if="error !== ''">
@@ -106,15 +134,27 @@
           <b-chatbox-setup-card class="ma-5 pa-5" :preferences="chatboxPreferences" />
         </div>
 
-        <v-textarea
-          class="conversation-input pa-0"
-          placeholder="Compose your message..."
-          v-model="message"
-          hide-details
-          @keydown="onInputKeyDown"
-          v-if="selectedConversation"
-          :loading="loadingSend"
-        />
+        <v-container fluid class="pa-0 ma-0" v-if="selectedConversation">
+          <v-row class="pa-0 ma-0">
+            <v-col cols="8" sm="10" class="pa-0 ma-0">
+              <v-textarea
+                class="conversation-input pa-0"
+                placeholder="Compose your message..."
+                v-model="message"
+                hide-details
+                :loading="loadingSend"
+                no-resize
+                outlined
+              />
+            </v-col>
+
+            <v-col cols="4" sm="2" class="pa-0 ma-0 text-center">
+              <v-btn fab depressed color="primary" @click="sendMessage" class="ma-3">
+                <v-icon>mdi-send</v-icon>
+              </v-btn>
+            </v-col>
+          </v-row>
+        </v-container>
       </v-col>
     </v-row>
 
@@ -124,6 +164,7 @@
 
 <script lang="ts">
 import { VueApp } from '@/app/vue';
+import moment from 'moment';
 import BMessage from '@/ui/components/inbox/message.vue';
 import { calendar } from '@/app/filters';
 import { InboxSubscriptionOptions, InboxType } from '@/domain/inbox/service';
@@ -155,7 +196,7 @@ export default VueApp.extend({
       seenConversations: new Set<string>(),
       baseUrl: '',
       chatboxPreferences: null as ChatboxPreferences | null,
-
+      lastMessageDate: moment('2000-01-01T00:00:00+0000'),
     };
   },
   computed: {
@@ -180,8 +221,8 @@ export default VueApp.extend({
       this.selectedConversation = null;
       this.seenConversations.clear();
       this.seenMessages.clear();
-      this.$inboxService.unsubscribeFromInbox();
       this.fetchData();
+      this.subscribeToMessages();
     },
   },
   created() {
@@ -197,9 +238,13 @@ export default VueApp.extend({
       if (this.isDone) {
         this.fetchDone();
         return;
-      // eslint-disable-next-line no-else-return
-      } else if (this.isTrash) {
+      }
+      if (this.isTrash) {
         this.fetchTrash();
+        return;
+      }
+      if (this.isSpam) {
+        this.fetchSpam();
         return;
       }
 
@@ -208,7 +253,7 @@ export default VueApp.extend({
 
       try {
         const [inbox, chatboxPreferences] = await Promise.all([
-          this.$inboxService.fetchInbox(),
+          this.$inboxService.fetchInbox(null),
           this.$inboxService.fetchChatboxPreferences(),
         ]);
 
@@ -239,18 +284,14 @@ export default VueApp.extend({
 
       try {
         const [inbox, chatboxPreferences] = await Promise.all([
-          this.$inboxService.fetchArchive(),
+          this.$inboxService.fetchArchive(null),
           this.$inboxService.fetchChatboxPreferences(),
         ]);
 
         this.chatboxPreferences = chatboxPreferences;
         this.conversations = inbox.conversations;
 
-        this.conversations.forEach((conversation) => {
-          this.seenConversations.add(conversation.conversation.id);
-          // eslint-disable-next-line max-len
-          conversation.messages.forEach((message) => this.seenMessages.add(message.id));
-        });
+        this.conversations.forEach((conversation) => this.onConversation(conversation));
 
         if (this.conversations.length !== 0) {
           this.messages = this.conversations[this.selectedConversationIndex].messages;
@@ -270,23 +311,47 @@ export default VueApp.extend({
 
       try {
         const [inbox, chatboxPreferences] = await Promise.all([
-          this.$inboxService.fetchArchive(),
+          this.$inboxService.fetchTrash(null),
           this.$inboxService.fetchChatboxPreferences(),
         ]);
 
         this.chatboxPreferences = chatboxPreferences;
         this.conversations = inbox.conversations;
 
-        this.conversations.forEach((conversation) => {
-          this.seenConversations.add(conversation.conversation.id);
-          // eslint-disable-next-line max-len
-          conversation.messages.forEach((message) => this.seenMessages.add(message.id));
-        });
+        this.conversations.forEach((conversation) => this.onConversation(conversation));
 
         if (this.conversations.length !== 0) {
           this.messages = this.conversations[this.selectedConversationIndex].messages;
           this.selectedConversation = this.conversations[this.selectedConversationIndex];
         }
+        this.loading = false;
+        VueApp.nextTick(() => {
+          this.scrollToBottom();
+        });
+      } catch (err) {
+        this.error = err.message;
+      }
+    },
+    async fetchSpam() {
+      this.loading = true;
+      this.error = '';
+
+      try {
+        const [inbox, chatboxPreferences] = await Promise.all([
+          this.$inboxService.fetchSpam(null),
+          this.$inboxService.fetchChatboxPreferences(),
+        ]);
+
+        this.chatboxPreferences = chatboxPreferences;
+        this.conversations = inbox.conversations;
+
+        this.conversations.forEach((conversation) => this.onConversation(conversation));
+
+        if (this.conversations.length !== 0) {
+          this.messages = this.conversations[this.selectedConversationIndex].messages;
+          this.selectedConversation = this.conversations[this.selectedConversationIndex];
+        }
+
         this.loading = false;
         VueApp.nextTick(() => {
           this.scrollToBottom();
@@ -301,6 +366,8 @@ export default VueApp.extend({
         inboxType = InboxType.Archive;
       } else if (this.isTrash) {
         inboxType = InboxType.Trash;
+      } else if (this.isSpam) {
+        inboxType = InboxType.Spam;
       }
 
       const options: InboxSubscriptionOptions = {
@@ -335,15 +402,19 @@ export default VueApp.extend({
     onConversation(conversation: ConversationWithContactsAndMessages): void {
       if (!this.seenConversations.has(conversation.conversation.id)) {
         // new conversation
-        conversation.messages.forEach((message) => this.seenMessages.add(message.id));
+        conversation.messages.forEach((message) => {
+          this.seenMessages.add(message.id);
+          const receivedAt = moment(message.received_at);
+          if (receivedAt.isAfter(this.lastMessageDate)) {
+            this.$inboxService.setLastMessageId(message.id);
+          }
+        });
         const index = this.conversations.length >= 1 ? 1 : 0;
         this.conversations.splice(index, 0, conversation);
         this.seenConversations.add(conversation.conversation.id);
       } else {
         // existing conversation
-        conversation.messages.forEach((message) => {
-          this.onMessage(message);
-        });
+        conversation.messages.forEach((message) => this.onMessage(message));
       }
 
       if (this.conversations.length === 1) {
@@ -358,6 +429,11 @@ export default VueApp.extend({
           }
         });
         this.seenMessages.add(message.id);
+
+        const receivedAt = moment(message.received_at);
+        if (receivedAt.isAfter(this.lastMessageDate)) {
+          this.$inboxService.setLastMessageId(message.id);
+        }
       }
     },
     selectedConversationIndexChanged(selected: number | undefined) {
@@ -374,12 +450,6 @@ export default VueApp.extend({
       if (container) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (container as any).scrollTop = (container as any).scrollHeight;
-      }
-    },
-    onInputKeyDown(e: KeyboardEvent) {
-      if (e.keyCode === 13 && !e.shiftKey) {
-        e.preventDefault();
-        this.sendMessage();
       }
     },
     async moveConversationToDone(conversation: Conversation) {
@@ -412,6 +482,21 @@ export default VueApp.extend({
         this.loadingSend = false;
       }
     },
+    async moveConversationToTrash(conversation: Conversation) {
+      this.loadingSend = true;
+      this.error = '';
+
+      try {
+        await this.$inboxService.moveConversationToTrash(conversation.id);
+        this.conversations = this.conversations
+          .filter((c) => c.conversation.id !== conversation.id);
+        this.selectedConversationIndexChanged(undefined);
+      } catch (err) {
+        this.error = err.message;
+      } finally {
+        this.loadingSend = false;
+      }
+    },
   },
 });
 </script>
@@ -430,10 +515,10 @@ export default VueApp.extend({
 
 .conversation {
   @media #{map-get($display-breakpoints, 'sm-and-down')} {
-    height: calc(100vh - 300px);
+    height: calc(100vh - 304px);
   }
   @media #{map-get($display-breakpoints, 'md-and-up')} {
-    height: calc(100vh - 244px);
+    height: calc(100vh - 248px);
   }
   display: flex;
   flex-direction: column;

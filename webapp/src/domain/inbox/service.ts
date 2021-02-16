@@ -47,12 +47,16 @@ export class InboxService {
   private store: Store<AppState>;
   private subscriptionTimeout: number;
   private router: Router;
+  private subscriptionType: InboxType;
+  private lastMessageId: string | null;
 
   constructor(apiClient: ApiClient, store: Store<AppState>, router: Router) {
     this.apiClient = apiClient;
     this.store = store;
     this.router = router;
-    this.subscriptionTimeout = DEFAULT_MESSAGES_TIMEOUT;
+    this.subscriptionTimeout = 0;
+    this.subscriptionType = InboxType.Inbox;
+    this.lastMessageId = null;
   }
 
   async createContact(input: CreateContact): Promise<void> {
@@ -67,9 +71,11 @@ export class InboxService {
     this.router.push({ path: '/inbox/contacts' });
   }
 
-  async fetchArchive(): Promise<Inbox> {
+  async fetchArchive(after: string | null): Promise<Inbox> {
+    this.lastMessageId = after;
     const input: GetArchive = {
       namespace_id: this.store.state.currentNamespace!.id!,
+      after,
     };
     const res: Inbox = await this.apiClient.post(Queries.archive, input);
 
@@ -100,9 +106,11 @@ export class InboxService {
     return res;
   }
 
-  async fetchInbox(): Promise<Inbox> {
+  async fetchInbox(after: string | null): Promise<Inbox> {
+    this.lastMessageId = after;
     const input: GetInbox = {
       namespace_id: this.store.state.currentNamespace!.id!,
+      after,
     };
     const res: Inbox = await this.apiClient.post(Queries.inbox, input);
 
@@ -117,21 +125,21 @@ export class InboxService {
     let inbox = null;
 
     try {
-      switch (options.inboxType) {
+      switch (this.subscriptionType) {
         case InboxType.Archive:
-          inbox = await this.fetchArchive();
+          inbox = await this.fetchArchive(this.lastMessageId);
           break;
         case InboxType.Inbox:
-          inbox = await this.fetchInbox();
+          inbox = await this.fetchInbox(this.lastMessageId);
           break;
         case InboxType.Spam:
-          inbox = await this.fetchSpam();
+          inbox = await this.fetchSpam(this.lastMessageId);
           break;
         case InboxType.Trash:
-          inbox = await this.fetchTrash();
+          inbox = await this.fetchTrash(this.lastMessageId);
           break;
         default:
-          inbox = await this.fetchInbox();
+          inbox = await this.fetchInbox(this.lastMessageId);
       }
       inbox.conversations.forEach((conversation) => {
         // conversation.messages.forEach((message: InboxMessage) => {
@@ -150,18 +158,22 @@ export class InboxService {
     }
   }
 
-  async fetchSpam(): Promise<Inbox> {
+  async fetchSpam(after: string | null): Promise<Inbox> {
+    this.lastMessageId = after;
     const input: GetSpam = {
       namespace_id: this.store.state.currentNamespace!.id!,
+      after,
     };
     const res: Inbox = await this.apiClient.post(Queries.spam, input);
 
     return res;
   }
 
-  async fetchTrash(): Promise<Inbox> {
+  async fetchTrash(after: string | null): Promise<Inbox> {
+    this.lastMessageId = after;
     const input: GetTrash = {
       namespace_id: this.store.state.currentNamespace!.id!,
+      after,
     };
     const res: Inbox = await this.apiClient.post(Queries.trash, input);
 
@@ -208,9 +220,19 @@ export class InboxService {
     return res;
   }
 
+  setLastMessageId(messageId: string | null) {
+    this.lastMessageId = messageId;
+  }
+
   subscribeToInbox(options: InboxSubscriptionOptions): void {
+    // eslint-disable-next-line no-unneeded-ternary
+    const startPolling = this.subscriptionTimeout === 0 ? true : false;
     this.subscriptionTimeout = DEFAULT_MESSAGES_TIMEOUT;
-    this.fetchInboxMessages(options);
+    this.subscriptionType = options.inboxType;
+
+    if (startPolling) {
+      this.fetchInboxMessages(options);
+    }
   }
 
   unsubscribeFromInbox(): void {
